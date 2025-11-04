@@ -1,88 +1,109 @@
-// C program to demonstrate use of fork() and pipe() 
-#include<stdio.h> 
-#include<stdlib.h> 
-#include<unistd.h> 
-#include<sys/types.h> 
-#include<string.h> 
-#include<sys/wait.h> 
-  
-int main() 
-{ 
-    // We use two pipes 
-    // First pipe to send input string from parent 
-    // Second pipe to send concatenated string from child 
-  
-    int fd1[2];  // Used to store two ends of first pipe 
-    int fd2[2];  // Used to store two ends of second pipe 
-  
-    char fixed_str[] = "howard.edu"; 
-    char input_str[100]; 
-    pid_t p; 
-  
-    if (pipe(fd1)==-1) 
-    { 
-        fprintf(stderr, "Pipe Failed" ); 
-        return 1; 
-    } 
-    if (pipe(fd2)==-1) 
-    { 
-        fprintf(stderr, "Pipe Failed" ); 
-        return 1; 
-    } 
-  
-    printf("Enter a string to concatenate:");
-    scanf("%s", input_str); 
-    p = fork(); 
-  
-    if (p < 0) 
-    { 
-        fprintf(stderr, "fork Failed" ); 
-        return 1; 
-    } 
-  
-    // Parent process 
-    else if (p > 0) 
-    { 
-  
-        close(fd1[0]);  // Close reading end of pipes 
-        close(fd2[0]);
-  
-        // Write input string and close writing end of first 
-        // pipe. 
-        write(fd1[1], input_str, strlen(input_str)+1); 
-        
-  
-        // Wait for child to print the concatenated string 
-        wait(NULL); 
-  
-        close(fd2[1]); // Close writing end of pipes 
-        close(fd1[1]); 
-    } 
-  
-    // child process 
-    else
-    { 
-        close(fd1[1]);  // Close writing end of first pipes 
-        close(fd2[1]); 
-      
-        // Read a string using first pipe 
-        char concat_str[100]; 
-        read(fd1[0], concat_str, 100); 
-  
-        // Concatenate a fixed string with it 
-        int k = strlen(concat_str); 
-        int i; 
-        for (i=0; i<strlen(fixed_str); i++) 
-            concat_str[k++] = fixed_str[i]; 
-  
-        concat_str[k] = '\0';   // string ends with '\0' 
-  
-        printf("Concatenated string %s\n", concat_str);
-        // Close both reading ends 
-        close(fd1[0]); 
-        close(fd2[0]); 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <errno.h>
 
-  
-        exit(0); 
-    } 
-} 
+#define BUF 1024
+
+static void die(const char *msg) {
+    perror(msg);
+    exit(EXIT_FAILURE);
+}
+
+static void strip_newline(char *s) {
+    size_t n = strlen(s);
+    if (n && s[n-1] == '\n') s[n-1] = '\0';
+}
+
+int main(void) {
+    int p1_to_p2[2]; // P1 writes -> P2 reads
+    int p2_to_p1[2]; // P2 writes -> P1 reads
+    pid_t pid;
+
+    if (pipe(p1_to_p2) == -1) die("pipe p1_to_p2");
+    if (pipe(p2_to_p1) == -1) die("pipe p2_to_p1");
+
+    pid = fork();
+    if (pid < 0) die("fork");
+
+    if (pid == 0) {
+        // --- Child (P2) ---
+        // Close unused ends
+        close(p1_to_p2[1]); // child reads from p1_to_p2[0]
+        close(p2_to_p1[0]); // child writes to p2_to_p1[1]
+
+        char in1[BUF];
+        ssize_t n = read(p1_to_p2[0], in1, sizeof(in1) - 1);
+        if (n < 0) die("child read");
+        in1[n] = '\0';
+
+        // Remove any trailing newline from P1 input (in case)
+        strip_newline(in1);
+
+        // Print required lines and concatenate "howard.edu"
+        printf("Other string is: howard.edu\n");
+        char cat1[BUF * 2];
+        snprintf(cat1, sizeof(cat1), "%showard.edu", in1);
+        printf("Input : %s\n", in1);
+        printf("Output : %s\n", cat1);
+        fflush(stdout);
+
+        // Prompt for second input, append it, then send back
+        char in2[BUF];
+        printf("Input : ");
+        fflush(stdout);
+        if (!fgets(in2, sizeof(in2), stdin)) {
+            // If EOF, just use empty string
+            in2[0] = '\0';
+        } else {
+            strip_newline(in2);
+        }
+
+        char back[BUF * 2];
+        snprintf(back, sizeof(back), "%s%s", cat1, in2);
+
+        size_t len = strlen(back);
+        if (write(p2_to_p1[1], back, len) != (ssize_t)len) die("child write");
+
+        // Clean up
+        close(p1_to_p2[0]);
+        close(p2_to_p1[1]);
+        _exit(EXIT_SUCCESS);
+    } else {
+        // --- Parent (P1) ---
+        // Close unused ends
+        close(p1_to_p2[0]); // parent writes to p1_to_p2[1]
+        close(p2_to_p1[1]); // parent reads from p2_to_p1[0]
+
+        char first[BUF];
+        printf("Input : ");
+        fflush(stdout);
+        if (!fgets(first, sizeof(first), stdin)) die("parent fgets");
+        strip_newline(first);
+
+        size_t len = strlen(first);
+        if (write(p1_to_p2[1], first, len) != (ssize_t)len) die("parent write");
+        close(p1_to_p2[1]); // done sending
+
+        // Read back from child
+        char mid[BUF * 2];
+        ssize_t n = read(p2_to_p1[0], mid, sizeof(mid) - 1);
+        if (n < 0) die("parent read");
+        mid[n] = '\0';
+
+        // Append "gobison.org" and print final
+        char final[BUF * 3];
+        snprintf(final, sizeof(final), "%sgobison.org", mid);
+        printf("Output : %s\n", final);
+        fflush(stdout);
+
+        close(p2_to_p1[0]);
+        // Wait for child to avoid a zombie (good hygiene)
+        int status = 0;
+        (void)waitpid(pid, &status, 0);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : EXIT_FAILURE;
+    }
+}
